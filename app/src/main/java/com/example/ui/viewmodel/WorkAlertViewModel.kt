@@ -8,6 +8,10 @@ import com.example.data.TaskRepository
 import com.example.model.*
 import com.example.network.SyncResult
 import com.example.network.WebServiceManager
+import com.example.sync.AutoSyncScheduler
+import com.example.sync.SyncEngine
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import com.example.whatsapp.WhatsAppDispatcher
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -30,7 +34,7 @@ data class WorkAlertUiState(
 
 class WorkAlertViewModel(application: Application) : AndroidViewModel(application) {
 
-    val repository = TaskRepository(application.applicationContext)
+    val repository = TaskRepository.get(application)
 
     val tasks = repository.tasks
     val employees = repository.employees
@@ -40,6 +44,19 @@ class WorkAlertViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _uiState = MutableStateFlow(WorkAlertUiState())
     val uiState: StateFlow<WorkAlertUiState> = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.awaitLoaded()
+            // Make sure background sync matches the saved settings (e.g. after an app update).
+            AutoSyncScheduler.apply(getApplication(), config.value)
+            // Keep "overdue" in step with the clock while the app is open.
+            while (isActive) {
+                repository.refreshOverdueFlags()
+                delay(60_000)
+            }
+        }
+    }
 
     fun selectTab(index: Int) {
         _uiState.update { it.copy(selectedTab = index) }
@@ -102,7 +119,9 @@ class WorkAlertViewModel(application: Application) : AndroidViewModel(applicatio
                 taskId = task.id,
                 employeeName = task.employeeName,
                 employeePhone = task.employeePhone,
-                message = message
+                message = message,
+                status = ReminderLog.STATUS_OPENED,
+                channel = ReminderLog.CHANNEL_DIRECT
             )
             _uiState.update { it.copy(toastMessage = "WhatsApp opened for ${task.employeeName}") }
         }
@@ -165,47 +184,32 @@ class WorkAlertViewModel(application: Application) : AndroidViewModel(applicatio
     // --- WEB SERVICE SYNC ---
     fun syncWithWebService() {
         viewModelScope.launch {
-            val currentConfig = config.value
             _uiState.update { it.copy(isSyncing = true, syncBannerMessage = null) }
 
-            val result = WebServiceManager.syncFromWebService(
-                url = currentConfig.url,
-                method = currentConfig.method,
-                authHeader = currentConfig.authHeader
-            )
+            val result = SyncEngine.syncFromConfiguredService(repository)
+            val alerts = SyncEngine.sendDueWebhookAlerts(repository)
+            val alertNote = if (alerts.sent + alerts.failed > 0) {
+                " · Auto WhatsApp: ${alerts.sent} sent, ${alerts.failed} failed"
+            } else ""
 
             when (result) {
                 is SyncResult.Success -> {
-                    repository.mergeSyncedTasks(result.tasks)
-                    repository.updateConfig(
-                        currentConfig.copy(
-                            lastSyncTimestamp = System.currentTimeMillis(),
-                            lastSyncStatus = "Success (${result.tasks.size} checklists received)",
-                            lastSyncCount = result.tasks.size
-                        )
-                    )
                     _uiState.update {
                         it.copy(
                             isSyncing = false,
                             isSyncSuccess = true,
                             syncBannerMessage = "Successfully synced ${result.tasks.size} checklists from Web Service!",
-                            toastMessage = "Web Service sync complete!"
+                            toastMessage = "Web Service sync complete!$alertNote"
                         )
                     }
                 }
                 is SyncResult.Error -> {
-                    repository.updateConfig(
-                        currentConfig.copy(
-                            lastSyncTimestamp = System.currentTimeMillis(),
-                            lastSyncStatus = "Failed: ${result.message}"
-                        )
-                    )
                     _uiState.update {
                         it.copy(
                             isSyncing = false,
                             isSyncSuccess = false,
                             syncBannerMessage = "Sync Error: ${result.message}",
-                            toastMessage = "Failed to sync: ${result.message}"
+                            toastMessage = "Failed to sync: ${result.message}$alertNote"
                         )
                     }
                 }
@@ -287,6 +291,7 @@ class WorkAlertViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun updateConfig(config: WebServiceConfig) {
         repository.updateConfig(config)
+        AutoSyncScheduler.apply(getApplication(), config)
         _uiState.update { it.copy(toastMessage = "Web Service settings saved!") }
     }
 

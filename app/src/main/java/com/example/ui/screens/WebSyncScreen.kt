@@ -47,6 +47,9 @@ fun WebSyncScreen(
     var autoSyncEnabled by remember(config.autoSyncEnabled) { mutableStateOf(config.autoSyncEnabled) }
     var autoSyncInterval by remember(config.autoSyncMinutes) { mutableStateOf(config.autoSyncMinutes) }
     var cloudWebhookUrlInput by remember(config.whatsappCloudWebhookUrl) { mutableStateOf(config.whatsappCloudWebhookUrl) }
+    var webhookApiKeyInput by remember(config.whatsappApiKey) { mutableStateOf(config.whatsappApiKey) }
+    var autoSendWebhook by remember(config.autoSendWebhookAlerts) { mutableStateOf(config.autoSendWebhookAlerts) }
+    var cooldownMinutes by remember(config.reminderCooldownMinutes) { mutableStateOf(config.reminderCooldownMinutes) }
 
     var isMethodDropdownExpanded by remember { mutableStateOf(false) }
     var showCustomJsonDialog by remember { mutableStateOf(false) }
@@ -233,6 +236,84 @@ fun WebSyncScreen(
                     )
                 }
 
+                if (autoSyncEnabled) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(15, 30, 60).forEach { minutes ->
+                            FilterChip(
+                                selected = autoSyncInterval == minutes,
+                                onClick = { autoSyncInterval = minutes },
+                                label = { Text(if (minutes == 60) "1 hour" else "$minutes min") },
+                                modifier = Modifier.testTag("sync_interval_$minutes")
+                            )
+                        }
+                    }
+                }
+
+                // Automatic WhatsApp sending through an API provider (EasySocial, Cloud API relay…)
+                HorizontalDivider()
+                Text(
+                    text = "Automatic WhatsApp (API webhook)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Without this, reminders open WhatsApp and you press Send. With a webhook, overdue tasks are messaged automatically after each sync. The app POSTs JSON {phone, message, task_title, timestamp}.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = cloudWebhookUrlInput,
+                    onValueChange = { cloudWebhookUrlInput = it },
+                    label = { Text("Webhook URL") },
+                    placeholder = { Text("https://your-whatsapp-api/send") },
+                    modifier = Modifier.fillMaxWidth().testTag("webhook_url_input"),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = webhookApiKeyInput,
+                    onValueChange = { webhookApiKeyInput = it },
+                    label = { Text("API key (sent as Bearer + x-api-key)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Auto-send overdue reminders", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = if (autoSendWebhook) "At most once every ${cooldownMinutes / 60}h per task" else "Off",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoSendWebhook,
+                        onCheckedChange = { autoSendWebhook = it },
+                        enabled = cloudWebhookUrlInput.isNotBlank(),
+                        modifier = Modifier.testTag("auto_send_switch")
+                    )
+                }
+                if (autoSendWebhook) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(60, 120, 240).forEach { minutes ->
+                            FilterChip(
+                                selected = cooldownMinutes == minutes,
+                                onClick = { cooldownMinutes = minutes },
+                                label = { Text("Every ${minutes / 60}h") }
+                            )
+                        }
+                    }
+                }
+
                 // Action Buttons: Save & Sync Now
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -247,7 +328,11 @@ fun WebSyncScreen(
                                     authHeader = authInput.trim(),
                                     companyName = companyNameInput.trim(),
                                     autoSyncEnabled = autoSyncEnabled,
-                                    autoSyncMinutes = autoSyncInterval
+                                    autoSyncMinutes = autoSyncInterval,
+                                    whatsappCloudWebhookUrl = cloudWebhookUrlInput.trim(),
+                                    whatsappApiKey = webhookApiKeyInput.trim(),
+                                    autoSendWebhookAlerts = autoSendWebhook && cloudWebhookUrlInput.isNotBlank(),
+                                    reminderCooldownMinutes = cooldownMinutes
                                 )
                             )
                             viewModel.syncWithWebService()

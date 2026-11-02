@@ -2,6 +2,8 @@ package com.example.data
 
 import android.content.Context
 import com.example.model.*
+import com.example.util.DueTime
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +17,25 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
-class TaskRepository(private val context: Context) {
+class TaskRepository private constructor(private val context: Context) {
+
+    companion object {
+        @Volatile private var instance: TaskRepository? = null
+
+        /**
+         * One shared repository per process, so the screens and the background
+         * sync worker never write the same JSON files from two copies at once.
+         */
+        fun get(context: Context): TaskRepository =
+            instance ?: synchronized(this) {
+                instance ?: TaskRepository(context.applicationContext).also { instance = it }
+            }
+    }
+
+    private val loaded = CompletableDeferred<Unit>()
+
+    /** Suspends until the saved data has been read from disk. */
+    suspend fun awaitLoaded() = loaded.await()
 
     private val mutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -41,12 +61,34 @@ class TaskRepository(private val context: Context) {
         }
     }
 
-    private suspend fun loadAllData() = mutex.withLock {
-        loadEmployeesInternal()
-        loadTemplatesInternal()
-        loadConfigInternal()
-        loadTasksInternal()
-        loadReminderLogsInternal()
+    private suspend fun loadAllData() {
+        mutex.withLock {
+            loadEmployeesInternal()
+            loadTemplatesInternal()
+            loadConfigInternal()
+            loadTasksInternal()
+            loadReminderLogsInternal()
+        }
+        loaded.complete(Unit)
+        refreshOverdueFlags()
+    }
+
+    /** Re-evaluates every task's overdue flag against the current time. */
+    suspend fun refreshOverdueFlags(now: Long = System.currentTimeMillis()) {
+        mutex.withLock {
+            var changed = false
+            val updated = _tasks.value.map { task ->
+                val overdue = DueTime.isOverdue(task, now)
+                if (overdue != task.isOverdue) {
+                    changed = true
+                    task.copy(isOverdue = overdue)
+                } else task
+            }
+            if (changed) {
+                _tasks.value = updated
+                saveTasksInternal(updated)
+            }
+        }
     }
 
     // --- EMPLOYEES ---
@@ -501,8 +543,30 @@ Thank you!
         }
     }
 
-    fun recordReminderDispatched(taskId: String, employeeName: String, employeePhone: String, message: String) {
-        scope.launch {
+    fun recordReminderDispatched(
+        taskId: String,
+        employeeName: String,
+        employeePhone: String,
+        message: String,
+        status: String = ReminderLog.STATUS_OPENED,
+        channel: String = ReminderLog.CHANNEL_DIRECT
+    ) {
+        scope.launch { recordReminderNow(taskId, employeeName, employeePhone, message, status, channel) }
+    }
+
+    /**
+     * Logs a reminder. A failed webhook attempt is logged but doesn't count as a
+     * reminder, so the next sync tries that task again.
+     */
+    suspend fun recordReminderNow(
+        taskId: String,
+        employeeName: String,
+        employeePhone: String,
+        message: String,
+        status: String,
+        channel: String
+    ) {
+        run {
             val now = System.currentTimeMillis()
             val log = ReminderLog(
                 id = UUID.randomUUID().toString(),
@@ -511,13 +575,14 @@ Thank you!
                 taskTitle = _tasks.value.firstOrNull { it.id == taskId }?.title ?: "Checklist Reminder",
                 messageText = message,
                 timestamp = now,
-                status = "Sent via WhatsApp",
-                channel = "WhatsApp Direct"
+                status = status,
+                channel = channel
             )
 
             mutex.withLock {
+                val counts = status != ReminderLog.STATUS_FAILED
                 val updatedTasks = _tasks.value.map { task ->
-                    if (task.id == taskId) {
+                    if (task.id == taskId && counts) {
                         task.copy(
                             lastReminderSentAt = now,
                             reminderCount = task.reminderCount + 1
@@ -535,19 +600,25 @@ Thank you!
     }
 
     fun mergeSyncedTasks(newTasks: List<ChecklistTask>) {
-        scope.launch {
+        scope.launch { mergeSyncedTasksNow(newTasks) }
+    }
+
+    suspend fun mergeSyncedTasksNow(newTasks: List<ChecklistTask>) {
+        run {
+            val now = System.currentTimeMillis()
             mutex.withLock {
                 val existingMap = _tasks.value.associateBy { it.id }.toMutableMap()
                 for (newTask in newTasks) {
                     val existing = existingMap[newTask.id]
                     if (existing != null) {
                         // Preserve local reminder stats if matching
-                        existingMap[newTask.id] = newTask.copy(
+                        val merged = newTask.copy(
                             lastReminderSentAt = existing.lastReminderSentAt,
                             reminderCount = existing.reminderCount
                         )
+                        existingMap[newTask.id] = merged.copy(isOverdue = DueTime.isOverdue(merged, now))
                     } else {
-                        existingMap[newTask.id] = newTask
+                        existingMap[newTask.id] = newTask.copy(isOverdue = DueTime.isOverdue(newTask, now))
                     }
                 }
                 val updatedList = existingMap.values.toList().sortedByDescending { it.priority == TaskPriority.HIGH }
@@ -636,7 +707,7 @@ Thank you!
                             taskTitle = obj.getString("taskTitle"),
                             messageText = obj.getString("messageText"),
                             timestamp = obj.getLong("timestamp"),
-                            status = obj.optString("status", "Sent via WhatsApp"),
+                            status = obj.optString("status", ReminderLog.STATUS_OPENED),
                             channel = obj.optString("channel", "WhatsApp Direct")
                         )
                     )
@@ -693,7 +764,9 @@ Thank you!
                     lastSyncCount = obj.optInt("lastSyncCount", 0),
                     companyName = obj.optString("companyName", "Apex Retail & Ops"),
                     whatsappCloudWebhookUrl = obj.optString("whatsappCloudWebhookUrl", ""),
-                    whatsappApiKey = obj.optString("whatsappApiKey", "")
+                    whatsappApiKey = obj.optString("whatsappApiKey", ""),
+                    autoSendWebhookAlerts = obj.optBoolean("autoSendWebhookAlerts", false),
+                    reminderCooldownMinutes = obj.optInt("reminderCooldownMinutes", 120)
                 )
                 return
             } catch (_: Exception) {}
@@ -701,7 +774,11 @@ Thank you!
     }
 
     fun updateConfig(config: WebServiceConfig) {
-        scope.launch {
+        scope.launch { updateConfigNow(config) }
+    }
+
+    suspend fun updateConfigNow(config: WebServiceConfig) {
+        run {
             mutex.withLock {
                 _webServiceConfig.value = config
                 try {
@@ -717,6 +794,8 @@ Thank you!
                         put("companyName", config.companyName)
                         put("whatsappCloudWebhookUrl", config.whatsappCloudWebhookUrl)
                         put("whatsappApiKey", config.whatsappApiKey)
+                        put("autoSendWebhookAlerts", config.autoSendWebhookAlerts)
+                        put("reminderCooldownMinutes", config.reminderCooldownMinutes)
                     }
                     File(context.filesDir, "config.json").writeText(obj.toString())
                 } catch (_: Exception) {}
