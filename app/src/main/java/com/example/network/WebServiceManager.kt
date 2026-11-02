@@ -153,7 +153,9 @@ object WebServiceManager {
                     rawPriority.contains("LOW") -> TaskPriority.LOW
                     else -> TaskPriority.MEDIUM
                 }
-                val isOverdue = item.optBoolean("is_overdue", status != TaskStatus.COMPLETED)
+                // Use the server's flag if it sends one; otherwise the due date/time decides
+                // (see DueTime). Previously every unfinished task defaulted to overdue.
+                val isOverdue = status != TaskStatus.COMPLETED && item.optBoolean("is_overdue", false)
 
                 // Subtasks / Items
                 val subtaskList = mutableListOf<SubTask>()
