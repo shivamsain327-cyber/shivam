@@ -67,9 +67,17 @@ data class ReminderLog(
     val taskTitle: String,
     val messageText: String,
     val timestamp: Long,
-    val status: String = "Sent via WhatsApp",
-    val channel: String = "WhatsApp Direct"
-)
+    val status: String = ReminderLog.STATUS_OPENED,
+    val channel: String = ReminderLog.CHANNEL_DIRECT
+) {
+    companion object {
+        const val STATUS_OPENED = "Opened in WhatsApp"
+        const val STATUS_SENT = "Sent via webhook"
+        const val STATUS_FAILED = "Webhook failed"
+        const val CHANNEL_DIRECT = "WhatsApp Direct"
+        const val CHANNEL_WEBHOOK = "WhatsApp API (auto)"
+    }
+}
 
 data class MessageTemplate(
     val id: String,
@@ -90,5 +98,9 @@ data class WebServiceConfig(
     val lastSyncCount: Int = 0,
     val companyName: String = "Apex Retail & Ops",
     val whatsappCloudWebhookUrl: String = "",
-    val whatsappApiKey: String = ""
+    val whatsappApiKey: String = "",
+    /** When true (and a webhook URL is set), overdue tasks are messaged automatically after each sync. */
+    val autoSendWebhookAlerts: Boolean = false,
+    /** Minimum gap between two automatic reminders for the same task. */
+    val reminderCooldownMinutes: Int = 120
 )
