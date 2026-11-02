@@ -1,0 +1,6 @@
+{
+  "name": "WorkAlert",
+  "description": "Sync employee checklists from your web service and automatically dispatch WhatsApp reminders for pending tasks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
