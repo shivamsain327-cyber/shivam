@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write  # needed to publish the install-link release
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -34,11 +37,17 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      # AI Studio injects this file when it builds; outside AI Studio we create a
-      # standard Android debug keystore so the existing signing config works.
+      # AI Studio injects this file when it builds. Here we use the
+      # DEBUG_KEYSTORE_B64 repo secret if it exists, so every build has the same
+      # signature and phones can update in place. Without it a fresh key is made
+      # each run, and the old app must be uninstalled before installing a new one.
       - name: Create debug keystore
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
-          if [ ! -f debug.keystore ]; then
+          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
+            echo "$DEBUG_KEYSTORE_B64" | base64 -d > debug.keystore
+          elif [ ! -f debug.keystore ]; then
             keytool -genkeypair -keystore debug.keystore \
               -storepass android -keypass android -alias androiddebugkey \
               -keyalg RSA -keysize 2048 -validity 10000 \
@@ -64,3 +73,17 @@ jobs:
         with:
           name: test-report
           path: app/build/reports/tests/
+
+      # One fixed install link that always serves the newest build:
+      # https://github.com/<owner>/<repo>/releases/latest/download/WorkAlert.apk
+      - name: Publish install link
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude-build-ci-autosync')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk WorkAlert.apk
+          gh release delete latest-apk --yes --cleanup-tag || true
+          gh release create latest-apk WorkAlert.apk \
+            --target "$GITHUB_SHA" --latest \
+            --title "WorkAlert – latest build" \
+            --notes "Built from ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}. Open this link on the phone to install: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/WorkAlert.apk"
